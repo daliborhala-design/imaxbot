@@ -6,19 +6,27 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from playwright.sync_api import sync_playwright
 
-# Bezpečný import stealth
-try:
-    from playwright_stealth import stealth as stealth_func
-except ImportError:
-    stealth_func = None
-
 # --- KONFIGURACE ---
 MOVIE_ID = "7268s2r" # ID filmu Odyssea
 CINEMA_ID = "1052"   # ID kina Flora
 EMAIL_RECIPIENT = "dalibor.hala@gmail.com"
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
-DAYS_TO_CHECK = 14   # Kolik dní dopředu kontrolovat
+
+# TADY NASTAVTE START:
+# Pokud chcete kontrolovat 14 dní od DNES, nechte: datetime.date.today()
+# Pokud chcete kontrolovat 14 dní od určitého data, použijte: datetime.date(2026, 8, 12)
+START_DATE = datetime.date(2026, 8, 12) 
+DAYS_TO_CHECK = 14   
+
+def apply_stealth_safely(page):
+    """Bezpečné aplikování stealth režimu bez pádu skriptu"""
+    try:
+        import playwright_stealth
+        # Voláme funkci stealth přímo z modulu
+        playwright_stealth.stealth(page)
+    except Exception as e:
+        print(f"Stealth režim nebyl aplikován (nevadí): {e}")
 
 def send_email(found_slots):
     if not EMAIL_SENDER or not EMAIL_PASSWORD:
@@ -31,7 +39,6 @@ def send_email(found_slots):
     msg['Subject'] = "VSTUPENKY IMAX 70mm: Odyssea - NALEZENO"
 
     body = "Byly nalezeny volné vstupenky (3 vedle sebe v jedné řadě) v následujících termínech:\n\n"
-    # Seřazení výsledků je zajištěno pořadím v cyklu
     body += "\n".join(found_slots)
     body += f"\n\nRezervace zde: https://www.cinemacity.cz/cinemas/flora/{CINEMA_ID}#/buy-tickets-by-cinema?in-cinema={CINEMA_ID}&view-mode=list"
     
@@ -52,38 +59,35 @@ def check_tickets_for_date(page, check_date):
     url = f"https://www.cinemacity.cz/cinemas/flora/{CINEMA_ID}#/buy-tickets-by-cinema?in-cinema={CINEMA_ID}&at={day_str}&for-movie={MOVIE_ID}&view-mode=list"
     
     daily_results = []
-    print(f"Kontroluji datum: {day_str}")
+    print(f"--- Kontroluji datum: {day_str} ---")
     
     try:
         page.goto(url, wait_until="networkidle", timeout=60000)
-        time.sleep(4) # Čas na načtení JS
+        time.sleep(5)
         
-        # Selektor pro tlačítka s časy
         showtime_selector = ".qb-movie-info-column a.btn-primary:not(.disabled)"
-        
-        # Zjistíme, jestli ten den film vůbec hrají
         count = page.locator(showtime_selector).count()
+        
         if count == 0:
+            print(f"Pro datum {day_str} nenalezena žádná představení.")
             return []
 
         for i in range(count):
             btn = page.locator(showtime_selector).nth(i)
             time_text = btn.inner_text().strip()
+            print(f"Prověřuji čas: {time_text}")
             
-            # Klik na čas
             btn.click()
-            time.sleep(3)
+            time.sleep(4)
             
-            # Tlačítko Host (pokud se objeví)
-            guest_btn = "button#guest-btn, button:has-text('host'), button:has-text('POKRAČOVAT JAKO HOST')"
+            guest_btn = "button#guest-btn, button:has-text('host'), button:has-text('Host'), button:has-text('POKRAČOVAT JAKO HOST')"
             try:
                 if page.locator(guest_btn).is_visible(timeout=5000):
                     page.click(guest_btn)
-                    time.sleep(3)
+                    time.sleep(4)
             except:
                 pass
 
-            # Kontrola sedadel
             try:
                 page.wait_for_selector(".seat-container, .seating-chart, rect.seat-available, .seat-row", timeout=15000)
                 time.sleep(2)
@@ -92,7 +96,7 @@ def check_tickets_for_date(page, check_date):
                 rows = page.locator(".seat-row").all()
                 
                 if not rows:
-                    # Fallback pro SVG mapy
+                    # Fallback pro SVG mapy (pokud nejsou klasické řady)
                     available_count = page.locator("rect.seat-available, .seat.available").count()
                     if available_count >= 3:
                         daily_results.append(f"{day_str} v {time_text} (nalezeno {available_count} volných míst celkem)")
@@ -112,11 +116,11 @@ def check_tickets_for_date(page, check_date):
                                 consecutive = 0
                         if found_match: break
             except:
-                print(f"Nepodařilo se načíst mapu sedadel pro {day_str} {time_text}")
+                print(f"Nepodařilo se načíst mapu sedadel pro {time_text}")
 
-            # Vrátíme se na seznam pro daný den
+            # Návrat na seznam
             page.goto(url, wait_until="networkidle")
-            time.sleep(2)
+            time.sleep(3)
             
     except Exception as e:
         print(f"Chyba při kontrole dne {day_str}: {e}")
@@ -133,12 +137,13 @@ def main():
             locale="cs-CZ"
         )
         page = context.new_page()
-        if stealth_func: stealth_func(page)
+        
+        # Bezpečné volání stealth
+        apply_stealth_safely(page)
 
-        # Hlavní smyčka přes 14 dní
-        today = datetime.date.today()
+        # Smyčka přes 14 dní od START_DATE
         for i in range(DAYS_TO_CHECK):
-            current_date = today + datetime.timedelta(days=i)
+            current_date = START_DATE + datetime.timedelta(days=i)
             res = check_tickets_for_date(page, current_date)
             all_found_slots.extend(res)
             
@@ -148,7 +153,7 @@ def main():
         print(f"Nalezeno celkem {len(all_found_slots)} termínů. Posílám e-mail.")
         send_email(all_found_slots)
     else:
-        print("V žádném z příštích 14 dní nebyly nalezeny 3 lístky vedle sebe.")
+        print(f"Během 14 dní od {START_DATE} nebyly nalezeny žádné vhodné lístky.")
 
 if __name__ == "__main__":
     main()
