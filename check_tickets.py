@@ -15,7 +15,7 @@ EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 
 # Dynamické nastavení: začínáme DNES a kontrolujeme 14 dní dopředu
 START_DATE = datetime.date.today() 
-DAYS_TO_CHECK = 14   
+DAYS_TO_CHECK = 20   
 
 def apply_stealth_safely(page):
     """Bezpečné aplikování stealth režimu bez pádu skriptu"""
