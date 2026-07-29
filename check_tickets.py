@@ -13,20 +13,17 @@ EMAIL_RECIPIENT = "dalibor.hala@gmail.com"
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 
-# TADY NASTAVTE START:
-# Pokud chcete kontrolovat 14 dní od DNES, nechte: datetime.date.today()
-# Pokud chcete kontrolovat 14 dní od určitého data, použijte: datetime.date(2026, 8, 12)
-START_DATE = datetime.date(2026, 8, 12) 
+# Dynamické nastavení: začínáme DNES a kontrolujeme 14 dní dopředu
+START_DATE = datetime.date.today() 
 DAYS_TO_CHECK = 14   
 
 def apply_stealth_safely(page):
     """Bezpečné aplikování stealth režimu bez pádu skriptu"""
     try:
         import playwright_stealth
-        # Voláme funkci stealth přímo z modulu
         playwright_stealth.stealth(page)
     except Exception as e:
-        print(f"Stealth režim nebyl aplikován (nevadí): {e}")
+        print(f"Stealth režim nebyl aplikován: {e}")
 
 def send_email(found_slots):
     if not EMAIL_SENDER or not EMAIL_PASSWORD:
@@ -38,9 +35,9 @@ def send_email(found_slots):
     msg['To'] = EMAIL_RECIPIENT
     msg['Subject'] = "VSTUPENKY IMAX 70mm: Odyssea - NALEZENO"
 
-    body = "Byly nalezeny volné vstupenky (3 vedle sebe v jedné řadě) v následujících termínech:\n\n"
+    body = f"Ahoj, bot našel volné vstupenky (3 vedle sebe) v období od {START_DATE} do {START_DATE + datetime.timedelta(days=DAYS_TO_CHECK-1)}:\n\n"
     body += "\n".join(found_slots)
-    body += f"\n\nRezervace zde: https://www.cinemacity.cz/cinemas/flora/{CINEMA_ID}#/buy-tickets-by-cinema?in-cinema={CINEMA_ID}&view-mode=list"
+    body += f"\n\nRezervuj zde: https://www.cinemacity.cz/cinemas/flora/{CINEMA_ID}#/buy-tickets-by-cinema?in-cinema={CINEMA_ID}&view-mode=list"
     
     msg.attach(MIMEText(body, 'plain'))
 
@@ -59,47 +56,50 @@ def check_tickets_for_date(page, check_date):
     url = f"https://www.cinemacity.cz/cinemas/flora/{CINEMA_ID}#/buy-tickets-by-cinema?in-cinema={CINEMA_ID}&at={day_str}&for-movie={MOVIE_ID}&view-mode=list"
     
     daily_results = []
-    print(f"--- Kontroluji datum: {day_str} ---")
+    print(f"Prověřuji: {day_str}")
     
     try:
+        # Přejdeme na stránku, čekáme na načtení sítě
         page.goto(url, wait_until="networkidle", timeout=60000)
-        time.sleep(5)
+        time.sleep(4) # Rezerva na dojetí skriptů Cinema City
         
+        # Selektor pro aktivní časy (tlačítka)
         showtime_selector = ".qb-movie-info-column a.btn-primary:not(.disabled)"
         count = page.locator(showtime_selector).count()
         
         if count == 0:
-            print(f"Pro datum {day_str} nenalezena žádná představení.")
-            return []
+            return [] # Ten den se nehraje nebo nejsou lístky
 
         for i in range(count):
             btn = page.locator(showtime_selector).nth(i)
             time_text = btn.inner_text().strip()
-            print(f"Prověřuji čas: {time_text}")
             
+            # Klik na nákup
             btn.click()
             time.sleep(4)
             
+            # Pokus o přeskočení přihlášení (Koupit jako host)
             guest_btn = "button#guest-btn, button:has-text('host'), button:has-text('Host'), button:has-text('POKRAČOVAT JAKO HOST')"
             try:
                 if page.locator(guest_btn).is_visible(timeout=5000):
                     page.click(guest_btn)
-                    time.sleep(4)
+                    time_sleep(4)
             except:
                 pass
 
+            # Kontrola sedadel (mapa)
             try:
                 page.wait_for_selector(".seat-container, .seating-chart, rect.seat-available, .seat-row", timeout=15000)
                 time.sleep(2)
                 
-                found_match = False
                 rows = page.locator(".seat-row").all()
+                found_match = False
                 
                 if not rows:
-                    # Fallback pro SVG mapy (pokud nejsou klasické řady)
+                    # Fallback pro SVG zobrazení
                     available_count = page.locator("rect.seat-available, .seat.available").count()
                     if available_count >= 3:
-                        daily_results.append(f"{day_str} v {time_text} (nalezeno {available_count} volných míst celkem)")
+                        daily_results.append(f"{day_str} v {time_text} (nalezeno celkem {available_count} volných míst)")
                 else:
                     for row in rows:
                         seats = row.locator(".seat, rect").all()
@@ -116,14 +116,14 @@ def check_tickets_for_date(page, check_date):
                                 consecutive = 0
                         if found_match: break
             except:
-                print(f"Nepodařilo se načíst mapu sedadel pro {time_text}")
+                print(f"Nepodařilo se analyzovat sedadla pro čas {time_text}")
 
-            # Návrat na seznam
+            # Vrátíme se zpět na seznam dne pro další čas
             page.goto(url, wait_until="networkidle")
-            time.sleep(3)
+            time.sleep(2)
             
     except Exception as e:
-        print(f"Chyba při kontrole dne {day_str}: {e}")
+        print(f"Chyba při zpracování data {day_str}: {e}")
         
     return daily_results
 
@@ -138,10 +138,10 @@ def main():
         )
         page = context.new_page()
         
-        # Bezpečné volání stealth
         apply_stealth_safely(page)
 
-        # Smyčka přes 14 dní od START_DATE
+        print(f"--- START KONTROLY (14 dní od {START_DATE}) ---")
+        
         for i in range(DAYS_TO_CHECK):
             current_date = START_DATE + datetime.timedelta(days=i)
             res = check_tickets_for_date(page, current_date)
@@ -150,10 +150,10 @@ def main():
         browser.close()
 
     if all_found_slots:
-        print(f"Nalezeno celkem {len(all_found_slots)} termínů. Posílám e-mail.")
+        print(f"ÚSPĚCH: Nalezeno {len(all_found_slots)} termínů.")
         send_email(all_found_slots)
     else:
-        print(f"Během 14 dní od {START_DATE} nebyly nalezeny žádné vhodné lístky.")
+        print("KONTROLA DOKONČENA: Žádné volné lístky nenalezeny.")
 
 if __name__ == "__main__":
     main()
