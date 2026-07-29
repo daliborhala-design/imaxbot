@@ -4,10 +4,9 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
+from playwright_stealth import stealth  # Opravený import
 
 # --- KONFIGURACE ---
-# Použijeme tvou URL, ale skript se vypořádá i s tím, když tam nic nebude
 URL = "https://www.cinemacity.cz/cinemas/flora/1052#/buy-tickets-by-cinema?in-cinema=1052&at=2026-08-12&for-movie=7268s2r&view-mode=list"
 EMAIL_RECIPIENT = "dalibor.hala@gmail.com"
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
@@ -44,13 +43,12 @@ def check_tickets():
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        # Nastavení českého jazyka, aby web nebyl v angličtině
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             locale="cs-CZ"
         )
         page = context.new_page()
-        stealth_sync(page)
+        stealth(page) # Opravené volání funkce stealth
 
         print(f"Otevírám hlavní stránku: {URL}")
         try:
@@ -63,50 +61,52 @@ def check_tickets():
             except:
                 pass
 
-            # Získáme počet tlačítek s časy
-            # Hledáme tlačítka, která mají text času (např. 14:00) a nejsou v minulosti (nemají class 'disabled')
+            # Kontrola, zda jsou k dispozici nějaké časy
             showtime_selector = ".qb-movie-info-column a.btn-primary:not(.disabled)"
-            page.wait_for_selector(showtime_selector, timeout=10000)
-            showtimes_count = page.locator(showtime_selector).count()
             
+            # Počkáme, zda se objeví aspoň jedno tlačítko
+            try:
+                page.wait_for_selector(showtime_selector, timeout=15000)
+            except:
+                print("Na stránce nebyla nalezena žádná dostupná představení (časy).")
+                return []
+
+            showtimes_count = page.locator(showtime_selector).count()
             print(f"Nalezeno aktivních časů: {showtimes_count}")
 
             for i in range(showtimes_count):
-                # Musíme pokaždé znovu najít tlačítka, protože se stránka mění
+                # Pokaždé musíme locator definovat znovu
                 btn = page.locator(showtime_selector).nth(i)
                 time_text = btn.inner_text().strip()
                 
                 print(f"Prověřuji čas: {time_text}")
                 
-                # Klikneme na čas (otevře se proces nákupu)
+                # Klikneme na čas
                 btn.click()
                 
                 # Počkáme na tlačítko "Pokračovat jako host"
                 try:
-                    guest_btn = "button#guest-btn, button:has-text('host'), button:has-text('Host')"
+                    guest_btn = "button#guest-btn, button:has-text('host'), button:has-text('Host'), button:has-text('POKRAČOVAT JAKO HOST')"
                     page.wait_for_selector(guest_btn, timeout=10000)
                     page.click(guest_btn)
                 except:
-                    print(f"Tlačítko 'Pokračovat jako host' pro čas {time_text} nenalezeno, možná se hned načetla mapa.")
+                    pass
 
-                # Počkáme na mapu sedadel (Cinema City ji kreslí jako SVG nebo divy)
+                # Počkáme na mapu sedadel
                 try:
                     page.wait_for_selector(".seat-container, .seating-chart, rect.seat-available", timeout=20000)
-                    time.sleep(3) # Krátká pauza na vykreslení všech sedadel
+                    time.sleep(4) 
 
-                    # Logika hledání 3 sedadel vedle sebe
-                    # Většina kin Cinema City používá v kódu třídu 'seat-available'
-                    # Projdeme všechny řady
+                    # Najdeme všechny řady
                     rows = page.locator(".seat-row").all()
                     found_in_this_time = False
                     
                     for row in rows:
-                        # V každé řadě získáme všechna sedadla a jejich stav
-                        # 'available' jsou ta, která lze koupit
                         seats_in_row = row.locator(".seat").all()
                         consecutive = 0
                         for seat in seats_in_row:
                             class_attr = seat.get_attribute("class") or ""
+                            # Hledáme sedadla, která mají třídu 'seat-available'
                             if "seat-available" in class_attr:
                                 consecutive += 1
                                 if consecutive >= 3:
@@ -118,17 +118,17 @@ def check_tickets():
                         if found_in_this_time:
                             break
                     
-                    print(f"Čas {time_text}: {'Nalezeno!' if found_in_this_time else 'Plno/Nedostatek míst'}")
+                    print(f"Čas {time_text}: {'NALEZENO!' if found_in_this_time else 'Plno nebo málo míst.'}")
 
                 except Exception as e:
-                    print(f"Chyba při kontrole sedadel pro čas {time_text}: {e}")
+                    print(f"Chyba při kontrole sedadel pro čas {time_text}")
 
-                # Vrátíme se zpět na hlavní seznam, abychom mohli zkusit další čas
+                # Vrátíme se na seznam představení
                 page.goto(URL, wait_until="networkidle")
-                time.sleep(2)
+                time.sleep(3)
 
         except Exception as e:
-            print(f"Celková chyba: {e}")
+            print(f"Nastala chyba: {e}")
         
         browser.close()
     return results
@@ -136,7 +136,7 @@ def check_tickets():
 if __name__ == "__main__":
     found_tickets = check_tickets()
     if found_tickets:
-        print("Nalezeny volné lístky, odesílám e-mail...")
+        print("Vstupenky nalezeny! Posílám e-mail.")
         send_email(found_tickets)
     else:
-        print("Žádné volné sekvence 3 lístků nebyly nalezeny.")
+        print("Konec kontroly: Žádné vyhovující lístky nenalezeny.")
