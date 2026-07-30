@@ -2,7 +2,7 @@ name: Check IMAX Tickets
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Spustit každých 30 minut
+    - cron: '17 * * * *'  # Bude se spouštět v 17. minutu každé hodiny
   workflow_dispatch:        # Umožňuje spustit ručně tlačítkem
 
 jobs:
