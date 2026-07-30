@@ -29,13 +29,14 @@ def send_email(found_slots, start_date, end_date, error_log=None):
         msg['Subject'] = f"🚀 NALEZENO: IMAX Odyssea ({timestamp})"
         body = f"Bot našel volná místa v období {start_date} až {end_date}:\n\n"
         body += "\n".join(found_slots)
+        body += f"\n\nRezervace: https://www.cinemacity.cz/cinemas/flora/{CINEMA_ID}#/buy-tickets-by-cinema?in-cinema={CINEMA_ID}&view-mode=list"
     else:
         status = "⚠️ CHYBA" if error_log else "✅ OK"
         msg['Subject'] = f"{status}: IMAX Kontrola ({timestamp})"
         body = f"Kontrola období: {start_date} - {end_date}\nStav: Žádná volná místa (3 v řadě) nenalezena.\n"
 
     if error_log:
-        body += f"\n\n--- LOG CHYB ---\n{error_log}"
+        body += f"\n\n--- LOG CHYB (pro ladění) ---\n{error_log}"
 
     msg.attach(MIMEText(body, 'plain'))
     try:
@@ -57,11 +58,11 @@ def check_tickets_for_date(page, check_date):
     page.goto(url, wait_until="load", timeout=60000)
     time.sleep(3)
 
-    # 1. ODSTRANĚNÍ COOKIE LIŠTY (překáží v klikání)
+    # Odstranění cookie lišty, pokud se objeví
     try:
         cookie_btn = page.locator("#onetrust-accept-btn-handler")
-        if cookie_btn.is_visible():
-            cookie_btn.click()
+        if cookie_btn.is_visible(timeout=3000):
+            cookie_btn.click(force=True)
             time.sleep(1)
     except: pass
 
@@ -75,43 +76,43 @@ def check_tickets_for_date(page, check_date):
     for i in range(count):
         try:
             btn = page.locator(showtime_selector).nth(i)
-            time_val = btn.inner_text().strip()
+            time_val = btn.inner_text().split('\n')[0].strip() # Bere jen čas
             
-            # Používáme force=True, aby kliknul i přes případné neviditelné vrstvy
+            # Kliknutí s force=True obchází překrývající prvky
             btn.click(force=True)
             time.sleep(4)
 
-            # 2. OŠETŘENÍ MODÁLNÍHO OKNA (Přihlášení / Host)
+            # Ošetření přihlašovacího okna / hosta
             guest_btn_selector = "button#guest-btn, button:has-text('host'), .btn-secondary:has-text('POKRAČOVAT')"
             try:
-                # Pokud okno vyskočilo, klikneme na hosta
                 guest_btn = page.locator(guest_btn_selector)
                 if guest_btn.is_visible(timeout=5000):
                     guest_btn.click(force=True)
                     time.sleep(4)
             except: pass
 
-            # 3. ANALÝZA SEDADEL
+            # Detekce sedadel
             page.wait_for_selector(".seat-container, rect.seat-available, .seat-row", timeout=15000)
             
             rows = page.locator(".seat-row").all()
-            found_in_time = False
             if not rows:
+                # Pokud není klasická tabulka, zkusíme SVG (např. 3 volná místa kdekoli jako fallback)
                 if page.locator("rect.seat-available").count() >= 3:
-                    daily_results.append(f"{day_str} v {time_val} (nalezeno v SVG mapě)")
+                    daily_results.append(f"{day_str} v {time_val} (nalezeno v mapě)")
             else:
                 for row in rows:
-                    # Hledáme řadu, která má aspoň 3 dostupné elementy
+                    # Kontrola třídy .available nebo .seat-available v HTML řádku
+                    # Hledáme 3 volná sedadla v rámci jednoho řádku
                     available_seats = row.locator(".seat-available, .seat.available").count()
-                    if available_count >= 3:
+                    if available_seats >= 3:
                         daily_results.append(f"{day_str} v {time_val}")
                         break
             
-            # Návrat zpět na seznam
+            # Návrat zpět na seznam dne
             page.goto(url, wait_until="load")
             time.sleep(2)
         except Exception as e:
-            print(f"Chyba u času v {day_str}: {str(e)[:100]}")
+            print(f"Chyba u času {time_val} dne {day_str}: {str(e)[:100]}")
             page.goto(url, wait_until="load")
 
     return daily_results
@@ -140,7 +141,6 @@ def main():
     except Exception:
         full_error_log += f"\nKritická chyba: {traceback.format_exc()}"
     
-    # E-mail se pošle vždy díky tomu, že je mimo hlavní try blok prohlížeče
     send_email(all_results, start_date, end_date, full_error_log if full_error_log else None)
 
 if __name__ == "__main__":
