@@ -2,50 +2,41 @@ import os
 import time
 import smtplib
 import datetime
+import traceback
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from playwright.sync_api import sync_playwright
 
 # --- KONFIGURACE ---
-MOVIE_ID = "7268s2r" # ID filmu Odyssea
-CINEMA_ID = "1052"   # ID kina Flora
+MOVIE_ID = "7268s2r"
+CINEMA_ID = "1052"
 EMAIL_RECIPIENT = "dalibor.hala@gmail.com"
 EMAIL_SENDER = os.environ.get("EMAIL_SENDER")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
+DAYS_TO_CHECK = 14
 
-# Dynamické nastavení: začínáme DNES a kontrolujeme 14 dní dopředu
-START_DATE = datetime.date.today() 
-DAYS_TO_CHECK = 14   
-END_DATE = START_DATE + datetime.timedelta(days=DAYS_TO_CHECK-1)
-
-def apply_stealth_safely(page):
-    """Bezpečné aplikování stealth režimu bez pádu skriptu"""
-    try:
-        import playwright_stealth
-        playwright_stealth.stealth(page)
-    except Exception as e:
-        print(f"Stealth režim nebyl aplikován: {e}")
-
-def send_email(found_slots, start_date, end_date):
+def send_email(found_slots, start_date, end_date, error_msg=None):
     if not EMAIL_SENDER or not EMAIL_PASSWORD:
-        print("CHYBA: Chybí e-mailové přihlašovací údaje v Secrets!")
+        print("CHYBA: Chybí e-mailové přihlašovací údaje!")
         return
 
     msg = MIMEMultipart()
     msg['From'] = EMAIL_SENDER
     msg['To'] = EMAIL_RECIPIENT
-
-    # Rozlišení předmětu a těla e-mailu podle výsledku
+    
+    status_prefix = "⚠️ CHYBA" if error_msg else "✅ OK"
     if found_slots:
-        msg['Subject'] = "VSTUPENKY IMAX 70mm: Odyssea - NALEZENO!"
-        body = f"Dobrá zpráva! Bot našel volné vstupenky (3 vedle sebe) v období od {start_date} do {end_date}:\n\n"
+        msg['Subject'] = f"🚀 NALEZENO: IMAX Odyssea ({start_date})"
+        body = f"Bot našel volné vstupenky (3 vedle sebe) v období {start_date} až {end_date}:\n\n"
         body += "\n".join(found_slots)
-        body += f"\n\nRezervuj okamžitě zde: https://www.cinemacity.cz/cinemas/flora/{CINEMA_ID}#/buy-tickets-by-cinema?in-cinema={CINEMA_ID}&view-mode=list"
+        body += f"\n\nRezervace: https://www.cinemacity.cz/cinemas/flora/{CINEMA_ID}#/buy-tickets-by-cinema?in-cinema={CINEMA_ID}&view-mode=list"
     else:
-        msg['Subject'] = "IMAX Bot: Kontrola dokončena (beze změn)"
-        body = f"Ahoj, bot právě provedl plánovanou kontrolu dostupnosti vstupenek.\n\n"
-        body += f"V prohledávaném období od {start_date} do {end_date} NEBYLY nalezeny žádné volné vstupenky (3 vedle sebe v jedné řadě).\n"
-        body += "\nBot bude kontrolu opakovat opět za hodinu."
+        msg['Subject'] = f"{status_prefix}: IMAX Kontrola ({datetime.datetime.now().strftime('%H:%M')})"
+        body = f"Kontrola období: {start_date} - {end_date}\n"
+        body += "Stav: Žádná volná místa (3 v řadě) nenalezena.\n"
+    
+    if error_msg:
+        body += f"\n\nUpozornění: Během kontroly došlo k chybě, výsledky nemusí být kompletní:\n{error_msg}"
 
     msg.attach(MIMEText(body, 'plain'))
 
@@ -55,102 +46,82 @@ def send_email(found_slots, start_date, end_date):
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.send_message(msg)
         server.quit()
-        print(f"E-mail ({'Úspěch' if found_slots else 'Status'}) byl odeslán.")
+        print("E-mail byl odeslán.")
     except Exception as e:
-        print(f"CHYBA při odesílání e-mailu: {e}")
+        print(f"E-mail se nepodařilo odeslat: {e}")
 
 def check_tickets_for_date(page, check_date):
     day_str = check_date.strftime("%Y-%m-%d")
     url = f"https://www.cinemacity.cz/cinemas/flora/{CINEMA_ID}#/buy-tickets-by-cinema?in-cinema={CINEMA_ID}&at={day_str}&for-movie={MOVIE_ID}&view-mode=list"
-    
     daily_results = []
-    print(f"Prověřuji: {day_str}")
     
-    try:
-        page.goto(url, wait_until="networkidle", timeout=60000)
-        time.sleep(4)
+    print(f"Prověřuji: {day_str}")
+    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+    time.sleep(3)
+    
+    showtime_selector = ".qb-movie-info-column a.btn-primary:not(.disabled)"
+    count = page.locator(showtime_selector).count()
+    
+    for i in range(min(count, 5)): # Kontrolujeme max 5 časů denně pro stabilitu
+        btn = page.locator(showtime_selector).nth(i)
+        time_text = btn.inner_text().strip()
+        btn.click()
+        time.sleep(3)
         
-        showtime_selector = ".qb-movie-info-column a.btn-primary:not(.disabled)"
-        count = page.locator(showtime_selector).count()
+        # Přeskočení hosta
+        try:
+            guest_btn = "button#guest-btn, button:has-text('host'), button:has-text('Host')"
+            if page.locator(guest_btn).is_visible(timeout=3000):
+                page.click(guest_btn)
+                time.sleep(3)
+        except: pass
+
+        # Kontrola sedadel
+        try:
+            page.wait_for_selector(".seat-row, rect.seat-available", timeout=10000)
+            rows = page.locator(".seat-row").all()
+            if not rows:
+                if page.locator("rect.seat-available").count() >= 3:
+                    daily_results.append(f"{day_str} v {time_text} (volná místa v SVG)")
+            else:
+                for row in rows:
+                    if "available" in (row.inner_html() or "").lower():
+                        # Zjednodušená detekce pro rychlost
+                        seats = row.locator(".seat.available, .seat-available").count()
+                        if seats >= 3:
+                            daily_results.append(f"{day_str} v {time_text}")
+                            break
+        except: pass
         
-        if count == 0:
-            return []
-
-        for i in range(count):
-            btn = page.locator(showtime_selector).nth(i)
-            time_text = btn.inner_text().strip()
-            
-            btn.click()
-            time.sleep(4)
-            
-            guest_btn = "button#guest-btn, button:has-text('host'), button:has-text('Host'), button:has-text('POKRAČOVAT JAKO HOST')"
-            try:
-                if page.locator(guest_btn).is_visible(timeout=5000):
-                    page.click(guest_btn)
-                    time.sleep(4)
-            except:
-                pass
-
-            try:
-                page.wait_for_selector(".seat-container, .seating-chart, rect.seat-available, .seat-row", timeout=15000)
-                time.sleep(2)
-                
-                rows = page.locator(".seat-row").all()
-                found_match = False
-                
-                if not rows:
-                    available_count = page.locator("rect.seat-available, .seat.available").count()
-                    if available_count >= 3:
-                        daily_results.append(f"{day_str} v {time_text} (nalezeno celkem {available_count} volných míst)")
-                else:
-                    for row in rows:
-                        seats = row.locator(".seat, rect").all()
-                        consecutive = 0
-                        for seat in seats:
-                            cls = seat.get_attribute("class") or ""
-                            if "available" in cls.lower():
-                                consecutive += 1
-                                if consecutive >= 3:
-                                    daily_results.append(f"{day_str} v {time_text}")
-                                    found_match = True
-                                    break
-                            else:
-                                consecutive = 0
-                        if found_match: break
-            except:
-                print(f"Nepodařilo se analyzovat sedadla pro čas {time_text}")
-
-            page.goto(url, wait_until="networkidle")
-            time.sleep(2)
-            
-    except Exception as e:
-        print(f"Chyba při zpracování data {day_str}: {e}")
+        page.goto(url, wait_until="domcontentloaded")
+        time.sleep(2)
         
     return daily_results
 
 def main():
+    start_date = datetime.date.today()
+    end_date = start_date + datetime.timedelta(days=DAYS_TO_CHECK-1)
     all_found_slots = []
-    
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            locale="cs-CZ"
-        )
-        page = context.new_page()
-        apply_stealth_safely(page)
+    error_info = None
 
-        print(f"--- START KONTROLY ({START_DATE} až {END_DATE}) ---")
-        
-        for i in range(DAYS_TO_CHECK):
-            current_date = START_DATE + datetime.timedelta(days=i)
-            res = check_tickets_for_date(page, current_date)
-            all_found_slots.extend(res)
+    browser_context = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0")
+            page = context.new_page()
             
-        browser.close()
-
-    # Odesíláme email VŽDY (ať už se našlo něco nebo ne)
-    send_email(all_found_slots, START_DATE, END_DATE)
+            for i in range(DAYS_TO_CHECK):
+                current_date = start_date + datetime.timedelta(days=i)
+                all_found_slots.extend(check_tickets_for_date(page, current_date))
+            
+            browser.close()
+    except Exception:
+        error_info = traceback.format_exc()
+        print(f"Nastala chyba: {error_info}")
+    finally:
+        # TOTO SE SPUSTÍ VŽDY
+        send_email(all_found_slots, start_date, end_date, error_info)
 
 if __name__ == "__main__":
     main()
